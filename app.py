@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import pickle
 import random
 import time
@@ -24,6 +25,9 @@ DEFAULT_DATASET_PATH = Path("dataset") / "creditcard.csv"
 UPLOAD_DATASET_DIR = Path("dataset") / "uploads"
 ACTIVE_UPLOAD_DATASET = UPLOAD_DATASET_DIR / "active_uploaded.csv"
 DEFAULT_COMPONENT_ORDER = ["RF", "LR", "XGB", "ARIMA", "LSTM", "CNN", "Transformer"]
+MODEL_COMPARISON_TTL_SECONDS = 300
+LIVE_STATS_TTL_SECONDS = 120
+MODEL_COMPARISON_MAX_ROWS = 3000
 
 
 class HybridInferenceEngine:
@@ -107,26 +111,27 @@ class HybridInferenceEngine:
             amount_feature = np.log1p(max(float(amount_value), 0.0))
             x = np.concatenate([x, np.array([[amount_feature]], dtype=float)], axis=1)
         x_scaled = self.scaler.transform(x)
-        x_seq = x_scaled.reshape((x_scaled.shape[0], x_scaled.shape[1], 1))
+        active_components = list(self.meta_components) if self.meta_components else list(DEFAULT_COMPONENT_ORDER)
+        component_scores = {}
 
-        rf_prob = float(self.rf.predict_proba(x_scaled)[0][1])
-        lr_prob = float(self.lr.predict_proba(x_scaled)[0][1])
-        xgb_prob = float(self.xgb.predict_proba(x_scaled)[0][1])
-        arima_score = float(score_anomaly_single(amount_value, self.arima, context_features=x_scaled))
+        if "RF" in active_components:
+            component_scores["RF"] = float(self.rf.predict_proba(x_scaled)[0][1])
+        if "LR" in active_components:
+            component_scores["LR"] = float(self.lr.predict_proba(x_scaled)[0][1])
+        if "XGB" in active_components:
+            component_scores["XGB"] = float(self.xgb.predict_proba(x_scaled)[0][1])
+        if "ARIMA" in active_components:
+            component_scores["ARIMA"] = float(score_anomaly_single(amount_value, self.arima, context_features=x_scaled))
 
-        lstm_prob = float(self.lstm.predict(x_seq, verbose=0).reshape(-1)[0])
-        cnn_prob = float(self.cnn.predict(x_seq, verbose=0).reshape(-1)[0])
-        transformer_prob = float(self.transformer.predict(x_seq, verbose=0).reshape(-1)[0])
-
-        component_scores = {
-            "RF": rf_prob,
-            "LR": lr_prob,
-            "XGB": xgb_prob,
-            "ARIMA": arima_score,
-            "LSTM": lstm_prob,
-            "CNN": cnn_prob,
-            "Transformer": transformer_prob,
-        }
+        needs_sequence_model = any(name in active_components for name in ("LSTM", "CNN", "Transformer"))
+        if needs_sequence_model:
+            x_seq = x_scaled.reshape((x_scaled.shape[0], x_scaled.shape[1], 1))
+            if "LSTM" in active_components:
+                component_scores["LSTM"] = float(self.lstm.predict(x_seq, verbose=0).reshape(-1)[0])
+            if "CNN" in active_components:
+                component_scores["CNN"] = float(self.cnn.predict(x_seq, verbose=0).reshape(-1)[0])
+            if "Transformer" in active_components:
+                component_scores["Transformer"] = float(self.transformer.predict(x_seq, verbose=0).reshape(-1)[0])
 
         meta_values = []
         for name in self.meta_components:
@@ -142,7 +147,7 @@ class HybridInferenceEngine:
         return {
             "final_prob": final_prob,
             "threshold": self.meta_threshold,
-            "active_components": list(self.meta_components),
+            "active_components": active_components,
             "component_scores": component_scores,
         }
 
@@ -154,6 +159,9 @@ legacy_model = None
 legacy_load_attempted = False
 active_uploaded_dataset_path = None
 HOME_METRICS_CACHE = {"payload": None, "ts": 0.0}
+MODEL_COMPARISON_CACHE = {"payload": None, "ts": 0.0}
+LIVE_STATS_CACHE = {"payload": None, "ts": 0.0, "key": None}
+DATASET_META_CACHE = {"key": None, "row_count": 0, "columns": []}
 
 
 def get_legacy_model():
@@ -652,19 +660,68 @@ def _load_api_row_dataset():
     raise FileNotFoundError("No dataset available. Upload a CSV first or add dataset/creditcard.csv.")
 
 
-def _compute_live_stats():
-    data = _load_api_row_dataset()
-    total_transactions = int(len(data))
-    has_class_column = "Class" in data.columns
+def _resolve_api_dataset_path():
+    if active_uploaded_dataset_path is not None and active_uploaded_dataset_path.exists():
+        return active_uploaded_dataset_path
+    if DEFAULT_DATASET_PATH.exists():
+        return DEFAULT_DATASET_PATH
+    raise FileNotFoundError("No dataset available. Upload a CSV first or add dataset/creditcard.csv.")
 
+
+def _file_signature(path):
+    stat = path.stat()
+    return (str(path.resolve()), int(stat.st_mtime), int(stat.st_size))
+
+
+def _get_cached_dataset_meta(dataset_path):
+    dataset_key = _file_signature(dataset_path)
+    if DATASET_META_CACHE.get("key") == dataset_key:
+        return {
+            "row_count": int(DATASET_META_CACHE.get("row_count", 0)),
+            "columns": list(DATASET_META_CACHE.get("columns", [])),
+        }
+
+    columns = pd.read_csv(dataset_path, nrows=0).columns.tolist()
+    with open(dataset_path, "rb") as file_obj:
+        line_count = sum(1 for _ in file_obj)
+    row_count = max(int(line_count) - 1, 0)
+
+    DATASET_META_CACHE["key"] = dataset_key
+    DATASET_META_CACHE["row_count"] = row_count
+    DATASET_META_CACHE["columns"] = columns
+    return {"row_count": row_count, "columns": columns}
+
+
+def _read_row_from_dataset(dataset_path, row_id):
+    frame = pd.read_csv(
+        dataset_path,
+        skiprows=lambda idx: idx > 0 and idx != (int(row_id) + 1),
+        nrows=1,
+    )
+    if frame.empty:
+        raise ValueError("Selected row is not available in dataset.")
+    return frame.iloc[0]
+
+
+def _compute_live_stats_from_path(dataset_path):
+    columns = pd.read_csv(dataset_path, nrows=0).columns.tolist()
+    has_class_column = "Class" in columns
+
+    total_transactions = 0
     fraud_count = 0
+
     if has_class_column:
-        class_values = pd.to_numeric(data["Class"], errors="coerce").fillna(0).astype(int)
-        fraud_count = int((class_values == 1).sum())
+        for chunk in pd.read_csv(dataset_path, usecols=["Class"], chunksize=50000):
+            class_values = pd.to_numeric(chunk["Class"], errors="coerce").fillna(0).astype(int)
+            total_transactions += int(len(class_values))
+            fraud_count += int((class_values == 1).sum())
+    else:
+        for chunk in pd.read_csv(dataset_path, chunksize=50000):
+            total_transactions += int(len(chunk))
 
     safe_count = int(max(total_transactions - fraud_count, 0))
     fraud_rate = round((fraud_count / total_transactions) * 100, 2) if total_transactions else 0.0
-    source = "uploaded_dataset" if active_uploaded_dataset_path is not None and active_uploaded_dataset_path.exists() else "default_dataset"
+    source = "uploaded_dataset" if dataset_path == active_uploaded_dataset_path else "default_dataset"
 
     return {
         "total_transactions": total_transactions,
@@ -677,6 +734,60 @@ def _compute_live_stats():
     }
 
 
+def _compute_live_stats():
+    dataset_path = _resolve_api_dataset_path()
+    dataset_key = _file_signature(dataset_path)
+    now = time.time()
+
+    cached_payload = LIVE_STATS_CACHE.get("payload")
+    cached_ts = float(LIVE_STATS_CACHE.get("ts", 0.0))
+    cached_key = LIVE_STATS_CACHE.get("key")
+    if cached_payload is not None and cached_key == dataset_key and (now - cached_ts) < float(LIVE_STATS_TTL_SECONDS):
+        return cached_payload
+
+    payload = _compute_live_stats_from_path(dataset_path)
+    LIVE_STATS_CACHE["payload"] = payload
+    LIVE_STATS_CACHE["ts"] = now
+    LIVE_STATS_CACHE["key"] = dataset_key
+    return payload
+
+
+def _load_training_report_summary():
+    report_path = MODELS_DIR / "training_report.json"
+    if not report_path.exists():
+        return None
+
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    candidates = []
+    final_metrics = report.get("final_test_metrics", {})
+    hybrid_f1 = final_metrics.get("f1")
+    if hybrid_f1 is not None:
+        candidates.append(("Hybrid", float(hybrid_f1)))
+
+    component_metrics_test = report.get("component_metrics_test", {})
+    if isinstance(component_metrics_test, dict):
+        for name, metrics in component_metrics_test.items():
+            if isinstance(metrics, dict) and metrics.get("f1") is not None:
+                candidates.append((str(name), float(metrics["f1"])))
+
+    best_model = "Unavailable"
+    best_f1 = None
+    if candidates:
+        best_model, best_f1 = max(candidates, key=lambda item: item[1])
+
+    split_sizes = report.get("split_sizes", {})
+    test_size = int(split_sizes.get("test", 0) or 0)
+    return {
+        "best_model": best_model,
+        "best_f1": best_f1,
+        "test_size": test_size,
+    }
+
+
 def _compute_home_metrics():
     stats = _compute_live_stats()
 
@@ -685,23 +796,18 @@ def _compute_home_metrics():
     test_size = 0
 
     try:
-        x_test, y_test = load_test_data()
-        test_size = int(len(y_test))
-
-        if hybrid_engine.ready:
-            comparison = _hybrid_model_comparison_payload(x_test, y_test)
-            models = comparison.get("models", [])
-            if models:
-                best_model = str(models[0].get("name", "Hybrid"))
-                best_f1 = float(models[0].get("f1_score", 0.0))
+        report_summary = _load_training_report_summary()
+        if report_summary is not None:
+            best_model = str(report_summary.get("best_model", "Unavailable"))
+            report_f1 = report_summary.get("best_f1")
+            best_f1 = float(report_f1) if report_f1 is not None else None
+            test_size = int(report_summary.get("test_size", 0) or 0)
+        elif hybrid_engine.ready:
+            best_model = "Hybrid"
         else:
             legacy = get_legacy_model()
             if legacy is not None:
-                eval_model = LegacyEvaluationModel(legacy)
-                y_pred = eval_model.predict(x_test)
-                metrics = _metric_summary_from_binary(y_test, y_pred)
                 best_model = "LegacyModel"
-                best_f1 = float(metrics.get("f1_score", 0.0))
     except Exception:
         # Keep home metrics endpoint resilient; stats cards should still render.
         pass
@@ -743,6 +849,13 @@ def _metric_summary_from_binary(y_true, y_pred):
 
 def _hybrid_model_comparison_payload(x_test, y_test):
     frame = _to_eval_frame(x_test)
+    y_values = np.asarray(y_test, dtype=int)
+
+    if len(frame) > MODEL_COMPARISON_MAX_ROWS:
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(len(frame), size=MODEL_COMPARISON_MAX_ROWS, replace=False)
+        frame = frame.iloc[sample_idx].reset_index(drop=True)
+        y_values = y_values[sample_idx]
 
     if all(f"V{i}" in frame.columns for i in range(1, 29)):
         v_values = frame[[f"V{i}" for i in range(1, 29)]].astype(float).to_numpy()
@@ -801,7 +914,7 @@ def _hybrid_model_comparison_payload(x_test, y_test):
     for model_name, probs in model_probabilities.items():
         threshold = hybrid_engine.meta_threshold if model_name == "Hybrid" else 0.5
         y_pred = (np.asarray(probs, dtype=float) >= float(threshold)).astype(int)
-        metrics = _metric_summary_from_binary(y_test, y_pred)
+        metrics = _metric_summary_from_binary(y_values, y_pred)
         models.append(
             {
                 "name": model_name,
@@ -813,8 +926,36 @@ def _hybrid_model_comparison_payload(x_test, y_test):
     return {
         "models": models,
         "best_model": models[0]["name"] if models else None,
-        "test_size": int(len(y_test)),
+        "test_size": int(len(y_values)),
     }
+
+
+def _get_cached_model_comparison(ttl_seconds=MODEL_COMPARISON_TTL_SECONDS):
+    now = time.time()
+    cached_payload = MODEL_COMPARISON_CACHE.get("payload")
+    cached_ts = float(MODEL_COMPARISON_CACHE.get("ts", 0.0))
+    if cached_payload is not None and (now - cached_ts) < float(ttl_seconds):
+        return cached_payload
+
+    x_test, y_test = load_test_data()
+    if hybrid_engine.ready:
+        payload = _hybrid_model_comparison_payload(x_test, y_test)
+    else:
+        legacy = get_legacy_model()
+        if legacy is None:
+            raise RuntimeError("No usable model found for comparison.")
+        eval_model = LegacyEvaluationModel(legacy)
+        y_pred = eval_model.predict(x_test)
+        metrics = _metric_summary_from_binary(y_test, y_pred)
+        payload = {
+            "models": [{"name": "LegacyModel", **metrics}],
+            "best_model": "LegacyModel",
+            "test_size": int(len(y_test)),
+        }
+
+    MODEL_COMPARISON_CACHE["payload"] = payload
+    MODEL_COMPARISON_CACHE["ts"] = now
+    return payload
 
 
 @app.route("/api/predict", methods=["POST", "OPTIONS"])
@@ -845,13 +986,15 @@ def api_predict_row():
             raise ValueError("row_id is required.")
 
         row_id = int(str(row_value).strip())
-        data = _load_api_row_dataset()
-        validate_dataset_columns(data)
+        dataset_path = _resolve_api_dataset_path()
+        meta = _get_cached_dataset_meta(dataset_path)
+        validate_dataset_columns(pd.DataFrame(columns=meta["columns"]))
 
-        if row_id < 0 or row_id >= len(data):
-            raise ValueError(f"Invalid row index. Use 0 to {len(data) - 1}.")
+        row_count = int(meta["row_count"])
+        if row_id < 0 or row_id >= row_count:
+            raise ValueError(f"Invalid row index. Use 0 to {row_count - 1}.")
 
-        row = data.iloc[row_id]
+        row = _read_row_from_dataset(dataset_path, row_id)
         values, amount = extract_model_input_from_row(row)
         result = _predict_json_payload(values, amount, input_type="row")
         result["row_id"] = row_id
@@ -866,13 +1009,15 @@ def api_random_test():
         return _api_success({})
 
     try:
-        data = _load_api_row_dataset()
-        validate_dataset_columns(data)
-        if len(data) == 0:
+        dataset_path = _resolve_api_dataset_path()
+        meta = _get_cached_dataset_meta(dataset_path)
+        validate_dataset_columns(pd.DataFrame(columns=meta["columns"]))
+        row_count = int(meta["row_count"])
+        if row_count == 0:
             raise ValueError("Dataset is empty.")
 
-        row_id = random.randint(0, len(data) - 1)
-        row = data.iloc[row_id]
+        row_id = random.randint(0, row_count - 1)
+        row = _read_row_from_dataset(dataset_path, row_id)
         values, amount = extract_model_input_from_row(row)
         result = _predict_json_payload(values, amount, input_type="random")
         result["row_id"] = row_id
@@ -901,23 +1046,7 @@ def api_model_comparison():
         return _api_success({})
 
     try:
-        x_test, y_test = load_test_data()
-        if hybrid_engine.ready:
-            payload = _hybrid_model_comparison_payload(x_test, y_test)
-            return _api_success(payload)
-
-        legacy = get_legacy_model()
-        if legacy is None:
-            raise RuntimeError("No usable model found for comparison.")
-
-        eval_model = LegacyEvaluationModel(legacy)
-        y_pred = eval_model.predict(x_test)
-        metrics = _metric_summary_from_binary(y_test, y_pred)
-        payload = {
-            "models": [{"name": "LegacyModel", **metrics}],
-            "best_model": "LegacyModel",
-            "test_size": int(len(y_test)),
-        }
+        payload = _get_cached_model_comparison(ttl_seconds=MODEL_COMPARISON_TTL_SECONDS)
         return _api_success(payload)
     except Exception as e:
         return _api_error(f"Model comparison failed: {str(e)}")

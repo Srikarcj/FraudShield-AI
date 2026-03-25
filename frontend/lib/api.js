@@ -1,4 +1,21 @@
 const FLASK_BASE_URL = process.env.NEXT_PUBLIC_FLASK_API_URL || "http://127.0.0.1:5000";
+const REQUEST_TIMEOUT_MS = 70000;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Backend request timed out. The server may be waking up on free tier.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function parseResponse(response) {
   let payload = null;
@@ -15,7 +32,7 @@ async function parseResponse(response) {
 }
 
 export async function predict(data) {
-  const response = await fetch(`${FLASK_BASE_URL}/api/predict`, {
+  const response = await fetchWithTimeout(`${FLASK_BASE_URL}/api/predict`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data)
@@ -24,7 +41,7 @@ export async function predict(data) {
 }
 
 export async function predictRow(rowId) {
-  const response = await fetch(`${FLASK_BASE_URL}/api/predict_row`, {
+  const response = await fetchWithTimeout(`${FLASK_BASE_URL}/api/predict_row`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ row_id: rowId })
@@ -33,7 +50,7 @@ export async function predictRow(rowId) {
 }
 
 export async function randomTest() {
-  const response = await fetch(`${FLASK_BASE_URL}/api/random_test`, {
+  const response = await fetchWithTimeout(`${FLASK_BASE_URL}/api/random_test`, {
     method: "GET"
   });
   return parseResponse(response);
@@ -43,7 +60,7 @@ export async function uploadCsv(file) {
   const formData = new FormData();
   formData.append("csv_file", file);
 
-  const response = await fetch(`${FLASK_BASE_URL}/api/upload_csv`, {
+  const response = await fetchWithTimeout(`${FLASK_BASE_URL}/api/upload_csv`, {
     method: "POST",
     body: formData
   });
@@ -51,21 +68,21 @@ export async function uploadCsv(file) {
 }
 
 export async function evaluateModel() {
-  const response = await fetch(`${FLASK_BASE_URL}/api/evaluate`, {
+  const response = await fetchWithTimeout(`${FLASK_BASE_URL}/api/evaluate`, {
     method: "GET"
   });
   return parseResponse(response);
 }
 
 export async function modelComparison() {
-  const response = await fetch(`${FLASK_BASE_URL}/api/model_comparison`, {
+  const response = await fetchWithTimeout(`${FLASK_BASE_URL}/api/model_comparison`, {
     method: "GET"
   });
   return parseResponse(response);
 }
 
 export async function getApiStatus() {
-  const response = await fetch(`${FLASK_BASE_URL}/api/status`, {
+  const response = await fetchWithTimeout(`${FLASK_BASE_URL}/api/status`, {
     method: "GET"
   });
   return parseResponse(response);
