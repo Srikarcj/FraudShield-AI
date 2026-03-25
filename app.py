@@ -8,6 +8,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
 
@@ -15,6 +16,7 @@ from arima_model import score_anomaly_batch, score_anomaly_single
 from evaluation import evaluate_model
 
 app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 FEATURE_COLUMNS = [f"V{i}" for i in range(1, 29)]
 MODELS_DIR = Path("models")
 LEGACY_MODEL_PATH = Path("model.pkl")
