@@ -1,0 +1,153 @@
+{
+  "dataset_path": "dataset\\creditcard.csv",
+  "split_sizes": {
+    "train": 397,
+    "meta": 85,
+    "test": 86
+  },
+  "fraud_counts": {
+    "train": 199,
+    "meta": 42,
+    "test": 43
+  },
+  "selected_components": [
+    "RF",
+    "XGB",
+    "Transformer",
+    "CNN",
+    "LSTM",
+    "LR",
+    "ARIMA"
+  ],
+  "meta_component_auc": {
+    "RF": 1.0,
+    "LR": 0.9258028792912514,
+    "XGB": 1.0,
+    "ARIMA": 0.9224806201550387,
+    "LSTM": 0.9462901439645626,
+    "CNN": 0.9928017718715394,
+    "Transformer": 1.0
+  },
+  "component_metrics_meta": {
+    "RF": {
+      "roc_auc": 1.0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "LR": {
+      "roc_auc": 0.9258028792912514,
+      "accuracy": 0.9294117647058824,
+      "precision": 0.8913043478260869,
+      "recall": 0.9761904761904762,
+      "f1": 0.9318181818181818
+    },
+    "XGB": {
+      "roc_auc": 1.0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "ARIMA": {
+      "roc_auc": 0.9224806201550387,
+      "accuracy": 0.9411764705882353,
+      "precision": 0.9111111111111111,
+      "recall": 0.9761904761904762,
+      "f1": 0.9425287356321839
+    },
+    "LSTM": {
+      "roc_auc": 0.9462901439645626,
+      "accuracy": 0.9529411764705882,
+      "precision": 0.9130434782608695,
+      "recall": 1.0,
+      "f1": 0.9545454545454546
+    },
+    "CNN": {
+      "roc_auc": 0.9928017718715394,
+      "accuracy": 0.9764705882352941,
+      "precision": 0.9545454545454546,
+      "recall": 1.0,
+      "f1": 0.9767441860465116
+    },
+    "Transformer": {
+      "roc_auc": 1.0,
+      "accuracy": 0.9882352941176471,
+      "precision": 0.9767441860465116,
+      "recall": 1.0,
+      "f1": 0.9882352941176471
+    }
+  },
+  "component_metrics_test": {
+    "RF": {
+      "roc_auc": 1.0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "LR": {
+      "roc_auc": 0.914007571660357,
+      "accuracy": 0.9186046511627907,
+      "precision": 0.875,
+      "recall": 0.9767441860465116,
+      "f1": 0.9230769230769231
+    },
+    "XGB": {
+      "roc_auc": 1.0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "ARIMA": {
+      "roc_auc": 0.9118442401297999,
+      "accuracy": 0.9186046511627907,
+      "precision": 0.875,
+      "recall": 0.9767441860465116,
+      "f1": 0.9230769230769231
+    },
+    "LSTM": {
+      "roc_auc": 0.9881016765819363,
+      "accuracy": 0.9418604651162791,
+      "precision": 0.9130434782608695,
+      "recall": 0.9767441860465116,
+      "f1": 0.9438202247191011
+    },
+    "CNN": {
+      "roc_auc": 0.952947539210384,
+      "accuracy": 0.9302325581395349,
+      "precision": 0.8775510204081632,
+      "recall": 1.0,
+      "f1": 0.9347826086956522
+    },
+    "Transformer": {
+      "roc_auc": 0.9826933477555435,
+      "accuracy": 0.9534883720930233,
+      "precision": 0.9148936170212766,
+      "recall": 1.0,
+      "f1": 0.9555555555555556
+    }
+  },
+  "meta_threshold_beta": 2.0,
+  "meta_threshold_score": 1.0,
+  "final_test_metrics": {
+    "accuracy": 0.9883720930232558,
+    "roc_auc": 1.0,
+    "precision": 0.9772727272727273,
+    "recall": 1.0,
+    "f1": 0.9885057471264368,
+    "threshold": 0.2259,
+    "confusion_matrix": [
+      [
+        42,
+        1
+      ],
+      [
+        0,
+        43
+      ]
+    ]
+  }
+}
